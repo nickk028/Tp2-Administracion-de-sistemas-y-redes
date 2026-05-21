@@ -19,8 +19,8 @@ from smtp_common import (
     R_START_MAIL, R_SERVICE_UNAVAIL, R_INSUFF_STORAGE,
     R_SYNTAX_ERROR, R_PARAM_ERROR, R_NOT_IMPLEMENTED,
     R_BAD_SEQUENCE, R_MBOX_UNAVAIL, R_TRANSACTION_FAILED,
-    encode_line, decode_line, dot_unstuff, parse_address,
-    RESERVED_MAILBOXES,
+    encode_line, decode_line, dot_unstuff, mail_regex_validator, parse_address,
+    RESERVED_MAILBOXES, R_HELP_MESSAGE
 )
 
 # ──────────────────────────────────────────────
@@ -138,9 +138,9 @@ class SMTPSession(threading.Thread):
         msg_path  = os.path.join(MAILBOX_DIR, f"msg_{timestamp}.txt")
         lines     = dot_unstuff(self.data_lines)
         with open(msg_path, "w", encoding="utf-8") as f:
-            f.write(received_header + "\r\n")
+            f.write(received_header.rstrip("\r\n") + "\n")
             for line in lines:
-                f.write(line + "\r\n")
+                f.write(line.rstrip("\r\n") + "\n")
         print(f"  [STORE] Mensaje guardado → {msg_path}")
 
     # ──────────────────────────────────────────
@@ -197,9 +197,11 @@ class SMTPSession(threading.Thread):
             self._send(R_BAD_SEQUENCE, "Transacción ya iniciada, usá RSET")
             return
         addr = parse_address(arg)
-        self.mail_from = addr if addr else "<>"
-        self._send(R_OK, f"De acuerdo, remitente: {self.mail_from}")
-
+        if mail_regex_validator(addr):
+            self.mail_from = addr if addr else "<>"
+            self._send(R_OK, f"De acuerdo, remitente: {self.mail_from}")
+        else:
+            self._send(R_PARAM_ERROR, "Formato de mail inválido")
     def _handle_rcpt(self, arg: str):
         if not self.greeted:
             self._send(R_BAD_SEQUENCE, "Primero enviá EHLO/HELO")
@@ -208,6 +210,11 @@ class SMTPSession(threading.Thread):
             self._send(R_BAD_SEQUENCE, "Primero enviá MAIL FROM")
             return
         addr = parse_address(arg)
+
+        if not mail_regex_validator(addr):
+            self._send(R_PARAM_ERROR, "Formato de mail inválido")
+            return
+
         if not addr:
             self._send(R_PARAM_ERROR, "Dirección de destinatario inválida")
             return
@@ -282,6 +289,10 @@ class SMTPSession(threading.Thread):
         if not arg:
             self._send(R_PARAM_ERROR, "Se requiere un argumento")
             return
+        if not mail_regex_validator(arg):
+            self._send(R_PARAM_ERROR, "Formato de mail inválido")
+            return
+
         local = arg.split("@")[0].lower() if "@" in arg else arg.lower()
         if local in RESERVED_MAILBOXES:
             self._send(R_OK, f"{arg} <{arg}@{SERVER_DOMAIN}>")
@@ -295,6 +306,41 @@ class SMTPSession(threading.Thread):
     def _handle_quit(self):
         self._send(R_GOODBYE, f"{SERVER_DOMAIN} Cerrando conexión. Hasta luego.")
         self.running = False
+
+    def _handle_help(self):
+        print(f"{R_HELP_MESSAGE} Códigos de respuesta SMTP:")
+        print(f"{R_HELP_MESSAGE} 220 Service ready        -> El servidor está listo para recibir conexiones.")
+        print(f"{R_HELP_MESSAGE} 221 Goodbye              -> La conexión se cerró correctamente.")
+        print(f"{R_HELP_MESSAGE} 250 OK                   -> La acción solicitada se completó con éxito.")
+        print(f"{R_HELP_MESSAGE} 251 Forward              -> El usuario no es local; el mensaje será reenviado.")
+        print(f"{R_HELP_MESSAGE} 252 VRFY cannot          -> No se puede verificar el usuario, pero se intentará entregar.")
+        print(f"{R_HELP_MESSAGE} 354 Start mail input     -> Comenzar envío de datos; finalizar con <CRLF>.<CRLF>.")
+        print(f"{R_HELP_MESSAGE} 421 Service unavailable  -> Servicio no disponible; se cerrará la conexión.")
+        print(f"{R_HELP_MESSAGE} 450 Mailbox busy         -> El buzón no está disponible temporalmente.")
+        print(f"{R_HELP_MESSAGE} 451 Local error          -> Error local durante el procesamiento.")
+        print(f"{R_HELP_MESSAGE} 452 Insufficient storage -> Espacio insuficiente o demasiados destinatarios.")
+        print(f"{R_HELP_MESSAGE} 500 Syntax error         -> Error de sintaxis o comando desconocido.")
+        print(f"{R_HELP_MESSAGE} 501 Parameter error      -> Error de sintaxis en parámetros o argumentos.")
+        print(f"{R_HELP_MESSAGE} 502 Not implemented      -> Comando no implementado por el servidor.")
+        print(f"{R_HELP_MESSAGE} 503 Bad sequence         -> Secuencia incorrecta de comandos.")
+        print(f"{R_HELP_MESSAGE} 504 Param not impl       -> Parámetro no soportado por el servidor.")
+        print(f"{R_HELP_MESSAGE} 550 Mailbox unavailable  -> El buzón no existe o no está disponible.")
+        print(f"{R_HELP_MESSAGE} 551 User not local       -> El usuario no pertenece a este servidor.")
+        print(f"{R_HELP_MESSAGE} 552 Exceeded storage     -> Se excedió la capacidad de almacenamiento.")
+        print(f"{R_HELP_MESSAGE} 553 Name not allowed     -> Nombre o dirección de buzón inválida.")
+        print(f"{R_HELP_MESSAGE} 554 Transaction failed   -> La transacción de correo falló.")
+        print(f"{R_HELP_MESSAGE} ")
+        print(f"{R_HELP_MESSAGE} Comandos SMTP disponibles:")
+        print(f"{R_HELP_MESSAGE} HELO <dominio>           -> Inicia la comunicación con el servidor.")
+        print(f"{R_HELP_MESSAGE} MAIL FROM:<direccion>    -> Define el remitente del mensaje.")
+        print(f"{R_HELP_MESSAGE} RCPT TO:<direccion>      -> Agrega un destinatario al mensaje.")
+        print(f"{R_HELP_MESSAGE} DATA                     -> Inicia el envío del cuerpo del mensaje.")
+        print(f"{R_HELP_MESSAGE}                            Finalizar con una línea que contenga solo '.'")
+        print(f"{R_HELP_MESSAGE} RSET                     -> Cancela la transacción actual y limpia el estado.")
+        print(f"{R_HELP_MESSAGE} VRFY <direccion>         -> Consulta si un usuario existe.")
+        print(f"{R_HELP_MESSAGE} NOOP                     -> Mantiene activa la conexión sin realizar acciones.")
+        print(f"{R_HELP_MESSAGE} HELP                     -> Muestra esta ayuda.")
+        print(f"{R_HELP_MESSAGE} QUIT                     -> Finaliza la sesión SMTP.")
 
     # ──────────────────────────────────────────
     #  Bucle principal de la sesión
@@ -335,6 +381,7 @@ class SMTPSession(threading.Thread):
             elif command == "VRFY":      self._handle_vrfy(arg)
             elif command == "NOOP":      self._handle_noop()
             elif command == "QUIT":      self._handle_quit()
+            elif command == "HELP":      continue
             elif command in ("EXPN"):
                 self._send(R_NOT_IMPLEMENTED, f"Comando {command} no implementado")
             else:

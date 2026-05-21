@@ -167,13 +167,14 @@ class SMTPClient:
             print(f"  [RECHAZADO] RCPT TO: {code}")
         return ok
 
-    def cmd_data(self, body_lines: list[str]) -> bool:
+    def cmd_data(self) -> bool:
         """
-        Envía el comando DATA y luego el cuerpo del mensaje.
+        Envía DATA, espera 354, pide asunto y cuerpo al usuario,
+        envía el mensaje y espera la confirmación final.
         Aplica dot-stuffing automáticamente.
         """
         # Paso 1: enviar DATA, esperar 354
-        
+        self._send_cmd("DATA")
         code, _ = self._recv_response(TIMEOUT_DATA_INIT)
         if code is None:
             print("  [TIMEOUT] Esperando 354.")
@@ -182,13 +183,33 @@ class SMTPClient:
             print(f"  [RECHAZADO] DATA: {code}")
             return False
 
-        # Paso 2: enviar cuerpo con dot-stuffing, timeout de bloque
+        # Paso 2: recién aquí se pide asunto y cuerpo al usuario
+        now    = datetime.datetime.now().strftime("%a, %d %b %Y %H:%M:%S +0000")
+        to_hdr = ", ".join(self._rcpt_list)
+        subj   = input("  Asunto del mensaje: ").strip()
+        lines  = [
+            f"Date: {now}",
+            f"From: {self._mail_from}",
+            f"To: {to_hdr}",
+            f"Subject: {subj}",
+            "",   # línea en blanco entre cabeceras y cuerpo
+        ]
+        print("  Escribí el cuerpo. Ingresá '.' en una línea vacía para terminar:\n")
+        while True:
+            try:
+                ln = input()
+            except EOFError:
+                break
+            if ln == ".":
+                break
+            lines.append(ln)
+
+        # Paso 3: enviar cuerpo con dot-stuffing
         self.sock.settimeout(TIMEOUT_DATA_BLOCK)
-        stuffed = dot_stuff(body_lines)
+        stuffed = dot_stuff(lines)
         try:
             for line in stuffed:
                 self.sock.sendall(encode_line(line))
-            # Línea terminadora
             self.sock.sendall(encode_line("."))
             print("  C: .")
         except socket.timeout:
@@ -198,14 +219,13 @@ class SMTPClient:
             print(f"  [ERROR] Enviando datos: {e}")
             return False
 
-        # Paso 3: esperar 250 final con timeout largo (10 min)
+        # Paso 4: esperar 250 final
         code, _ = self._recv_response(TIMEOUT_DATA_END)
         if code is None:
             print("  [TIMEOUT] Esperando confirmación final del DATA.")
             return False
         ok = code.startswith("2")
         if ok:
-            # Limpiar estado tras transacción exitosa
             self._mail_from = None
             self._rcpt_list = []
         else:
@@ -296,7 +316,7 @@ class SMTPClient:
 
         while True:
             try:
-                choice = input("\n> Comando [1-7]: ").strip()
+                choice = input("\n> Comando [1-8]: ").strip()
             except (EOFError, KeyboardInterrupt):
                 print("\n[CLIENT] Interrumpido. Enviando QUIT...")
                 self.cmd_quit()
@@ -323,32 +343,8 @@ class SMTPClient:
                 if not self._rcpt_list:
                     print("  [ERROR] Falta al menos un RCPT TO. Usá la opción 2 primero.")
                     continue
-                
-                self._send_cmd("DATA")
-                
-                # Cabeceras automáticas con fecha real
-                now     = datetime.datetime.now().strftime("%a, %d %b %Y %H:%M:%S +0000")
-                to_hdr  = ", ".join(self._rcpt_list)
-                subj    = input("  Asunto del mensaje: ").strip()
-                lines   = [
-                    f"Date: {now}",
-                    f"From: {self._mail_from}",
-                    f"To: {to_hdr}",
-                    f"Subject: {subj}",
-                    "",   # línea en blanco separa cabeceras del cuerpo
-                ]
 
-                print("  Escribí el cuerpo. Ingresá '.' en una línea vacía para terminar:\n")
-                while True:
-                    try:
-                        ln = input()
-                    except EOFError:
-                        break
-                    if ln == ".":
-                        break
-                    lines.append(ln)
-
-                if self.cmd_data(lines):
+                if self.cmd_data():
                     print("  [OK] Mensaje enviado correctamente.")
                     self._print_menu()   # Refrescar estado (se limpió)
 
@@ -375,7 +371,7 @@ class SMTPClient:
                 self.cmd_help()
 
             else:
-                print("  Opción inválida. Ingresá un número del 1 al 7.")
+                print("  Opción inválida. Ingresá un número del 1 al 8.")
 
 
 # ══════════════════════════════════════════════

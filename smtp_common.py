@@ -1,7 +1,7 @@
 """
 smtp_common.py — Constantes y utilidades compartidas RFC 5321
 """
-
+import re
 # ──────────────────────────────────────────────
 #  Puerto y host por defecto
 # ──────────────────────────────────────────────
@@ -22,6 +22,7 @@ TIMEOUT_SERVER_WAIT = 300   # Espera de próximo comando          → 5 min
 # ──────────────────────────────────────────────
 #  Códigos de respuesta SMTP (RFC 5321 §4.2)
 # ──────────────────────────────────────────────
+R_HELP_MESSAGE        = "214"   # Información sobre cómo utilizar el receptor
 R_SERVICE_READY       = "220"   # Saludo inicial
 R_GOODBYE             = "221"   # Cierre de conexión
 R_OK                  = "250"   # Acción completada
@@ -107,3 +108,6 @@ def parse_address(token: str) -> str:
     if ":" in token:
         return token.split(":", 1)[1].strip()
     return token
+
+def mail_regex_validator(mail: str) -> bool:
+    return re.fullmatch(r"(([^@]+)@([^@]+)\.([^@]+))", mail)
