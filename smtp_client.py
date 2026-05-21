@@ -10,8 +10,6 @@ Flujo interactivo:
 """
 
 import socket
-import sys
-import os
 import datetime
 
 from smtp_common import (
@@ -21,8 +19,7 @@ from smtp_common import (
     TIMEOUT_DATA_INIT,
     TIMEOUT_DATA_BLOCK,
     TIMEOUT_DATA_END,
-    TIMEOUT_SERVER_WAIT,
-    encode_line, decode_line, dot_stuff, parse_address,
+    encode_line, decode_line, dot_stuff,
 )
 
 CLIENT_DOMAIN = "cliente.local"
@@ -176,7 +173,7 @@ class SMTPClient:
         Aplica dot-stuffing automáticamente.
         """
         # Paso 1: enviar DATA, esperar 354
-        self._send_cmd("DATA")
+        
         code, _ = self._recv_response(TIMEOUT_DATA_INIT)
         if code is None:
             print("  [TIMEOUT] Esperando 354.")
@@ -246,6 +243,10 @@ class SMTPClient:
         self._send_cmd("QUIT")
         self._recv_response(TIMEOUT_MAIL_RCPT)
         self.disconnect()
+    
+    def cmd_help(self):
+        self._send_cmd("HELP")
+        self._print_menu()
 
     # ──────────────────────────────────────────
     #  Helpers de presentación
@@ -270,6 +271,7 @@ class SMTPClient:
         print("  6) NOOP       — Envía un ping al servidor para verificar que")
         print("                  la conexión sigue activa.")
         print("  7) QUIT       — Cierra la sesión correctamente.")
+        print("  8) HELP       — Vuelve a mostar el menú.")
         print("─" * 60)
         print(f"  Estado actual  →  From: {from_str}")
         print(f"                    To:   {rcpt_str}")
@@ -321,9 +323,11 @@ class SMTPClient:
                 if not self._rcpt_list:
                     print("  [ERROR] Falta al menos un RCPT TO. Usá la opción 2 primero.")
                     continue
-
+                
+                self._send_cmd("DATA")
+                
                 # Cabeceras automáticas con fecha real
-                now     = datetime.datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S +0000")
+                now     = datetime.datetime.now().strftime("%a, %d %b %Y %H:%M:%S +0000")
                 to_hdr  = ", ".join(self._rcpt_list)
                 subj    = input("  Asunto del mensaje: ").strip()
                 lines   = [
@@ -366,6 +370,9 @@ class SMTPClient:
                 self.cmd_quit()
                 print("[CLIENT] Sesión cerrada.")
                 return
+            
+            elif choice == "8":  # HELP
+                self.cmd_help()
 
             else:
                 print("  Opción inválida. Ingresá un número del 1 al 7.")

@@ -10,7 +10,6 @@ El operador puede aceptar o rechazar manualmente:
 import socket
 import threading
 import datetime
-import sys
 import os
 
 from smtp_common import (
@@ -67,7 +66,7 @@ class SMTPSession(threading.Thread):
 
     def _send(self, code: str, message: str):
         line = f"{code} {message}"
-        print(f"  [S→C] {line}")
+        print(f"  S: {line}")
         try:
             self.conn.sendall(encode_line(line))
         except OSError:
@@ -183,7 +182,7 @@ class SMTPSession(threading.Thread):
             "250 HELP",
         ]
         for line in extensions:
-            print(f"  [S→C] {line}")
+            print(f"  S: {line}")
             try:
                 self.conn.sendall(encode_line(line))
             except OSError:
@@ -319,7 +318,7 @@ class SMTPSession(threading.Thread):
             if not raw.strip():
                 continue
 
-            print(f"  [C→S] {raw}")
+            print(f"  C: {raw}")
 
             # Separar comando y argumentos
             parts   = raw.strip().split(None, 1)
