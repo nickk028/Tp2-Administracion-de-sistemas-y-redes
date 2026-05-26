@@ -4,7 +4,7 @@ Uso: python smtp_client.py
 
 Flujo interactivo:
   1. Conecta al servidor y espera el 220.
-  2. Envía HELO automáticamente.
+  2. Envía EHLO automáticamente y guarda las extensiones del servidor.
   3. Menú de comandos: MAIL FROM, RCPT TO, DATA, RSET, VRFY, NOOP, QUIT.
   4. Timeouts individuales por comando según RFC 5321 §4.5.3.2.
 """
@@ -39,6 +39,7 @@ class SMTPClient:
         # Estado de la transacción actual
         self._mail_from: str | None = None
         self._rcpt_list: list[str]  = []
+        self.extensions: dict[str, str] = {}   # extensiones anunciadas por el servidor
 
     # ──────────────────────────────────────────
     #  Conexión y desconexión
@@ -125,16 +126,39 @@ class SMTPClient:
     #  Comandos SMTP
     # ──────────────────────────────────────────
 
-    def cmd_helo(self) -> bool:
-        self._send_cmd(f"HELO {CLIENT_DOMAIN}")
-        code, _ = self._recv_response(TIMEOUT_MAIL_RCPT)
+    def cmd_ehlo(self) -> bool:
+        """
+        EHLO (RFC 5321 §4.1.1.1) — saludo extendido.
+        El servidor responde con una lista de extensiones soportadas
+        en formato multi-línea 250-. Las parseamos y guardamos en
+        self.extensions para usarlas durante la sesión.
+        """
+        self._send_cmd(f"EHLO {CLIENT_DOMAIN}")
+        # Recibimos la respuesta multi-línea completa
+        code, full = self._recv_response(TIMEOUT_MAIL_RCPT)
         if code is None:
-            print("  [CLIENT] Timeout en HELO.")
+            print("  [TIMEOUT] EHLO sin respuesta.")
             return False
-        ok = code.startswith("2")
-        if not ok:
-            print(f"  [CLIENT] HELO rechazado: {code}")
-        return ok
+        if not code.startswith("2"):
+            print(f"  [RECHAZADO] EHLO: {code}")
+            return False
+
+        # Parsear extensiones: cada línea "250-KEYWORD [param]" o "250 KEYWORD"
+        self.extensions: dict[str, str] = {}
+        for line in full.split("\n"):
+            line = line.strip()
+            # Saltar la primera línea (es el saludo del dominio)
+            if len(line) > 4 and line[:3] == "250":
+                keyword_part = line[4:].strip()   # quita "250-" o "250 "
+                parts = keyword_part.split(None, 1)
+                if parts:
+                    kw    = parts[0].upper()
+                    param = parts[1] if len(parts) > 1 else ""
+                    self.extensions[kw] = param
+
+        if self.extensions:
+            print(f"  [EHLO] Extensiones del servidor: {list(self.extensions.keys())}")
+        return True
 
     def cmd_mail_from(self, addr: str) -> bool:
         if self._mail_from:
@@ -310,10 +334,10 @@ class SMTPClient:
         if not self.connect():
             return
 
-        # HELO automático al iniciar
-        print("[CLIENT] Enviando HELO...")
-        if not self.cmd_helo():
-            print("[CLIENT] HELO falló. Cerrando.")
+        # EHLO al iniciar — saludo extendido (RFC 5321 §4.1.1.1)
+        print("[CLIENT] Enviando EHLO...")
+        if not self.cmd_ehlo():
+            print("[CLIENT] EHLO falló. Cerrando.")
             self.disconnect()
             return
 
