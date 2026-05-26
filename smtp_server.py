@@ -1,10 +1,6 @@
 """
 smtp_server.py — Servidor SMTP según RFC 5321
 Uso: python smtp_server.py
-
-El operador puede aceptar o rechazar manualmente:
-  - Cada comando RCPT TO  (y/n)
-  - La transacción completa al recibir DATA (y/n)
 """
 
 import socket
@@ -13,25 +9,27 @@ import datetime
 import os
 
 from smtp_common import (
-    HELP_LINES, SMTP_HOST, SMTP_PORT,
-    TIMEOUT_SERVER_WAIT,
-    R_SERVICE_READY, R_GOODBYE, R_OK, R_VRFY_CANNOT,
-    R_START_MAIL, R_SERVICE_UNAVAIL, R_INSUFF_STORAGE,
-    R_SYNTAX_ERROR, R_PARAM_ERROR, R_NOT_IMPLEMENTED,
-    R_BAD_SEQUENCE, R_MBOX_UNAVAIL, R_TRANSACTION_FAILED,
-    encode_line, decode_line, dot_unstuff, mail_regex_validator, parse_address,
-    RESERVED_MAILBOXES, R_HELP_MESSAGE
+    SMTP_HOST, SMTP_PORT,
+    TIMEOUT_SERVER_WAIT, TIMEOUT_DATA_BLOCK,
+    MAX_RECIPIENTS, MAX_MESSAGE_SIZE, MAX_LINE_LENGTH,
+    R_HELP_MESSAGE, R_SERVICE_READY, R_GOODBYE, R_OK,
+    R_VRFY_CANNOT, R_START_MAIL, R_SERVICE_UNAVAIL,
+    R_INSUFF_STORAGE, R_SYNTAX_ERROR, R_PARAM_ERROR,
+    R_NOT_IMPLEMENTED, R_BAD_SEQUENCE, R_MBOX_UNAVAIL,
+    R_TRANSACTION_FAILED, R_EXCEEDED_STORAGE,
+    HELP_LINES, RESERVED_MAILBOXES,
+    encode_line,
+    recv_line_buffered,
+    dot_unstuff, mail_regex_validator,
+    is_null_address, parse_mail_from,
+    parse_address, make_message_id,
 )
 
-# ──────────────────────────────────────────────
-#  Directorio donde se guardan los mensajes
-# ──────────────────────────────────────────────
-MAILBOX_DIR = os.path.join(os.path.dirname(__file__), "mailbox")
+MAILBOX_DIR   = os.path.join(os.path.dirname(__file__), "mailbox")
 os.makedirs(MAILBOX_DIR, exist_ok=True)
 
 SERVER_DOMAIN = "localhost"
 
-# Lock para que la consola interactiva no se mezcle entre hilos
 _console_lock = threading.Lock()
 
 
@@ -40,28 +38,33 @@ _console_lock = threading.Lock()
 # ══════════════════════════════════════════════
 
 class SMTPSession(threading.Thread):
-    """Maneja una conexión SMTP entrante siguiendo RFC 5321."""
 
     def __init__(self, conn: socket.socket, addr):
         super().__init__(daemon=True)
-        self.conn   = conn
-        self.addr   = addr
+        self.conn    = conn
+        self.addr    = addr
+        self.running = True
+        # ── estado de saludo ──────────────────────────────────────────
+        self.greeted      = False   # ¿ya se recibió HELO/EHLO?
+        self.used_esmtp   = False   # True si el saludo fue EHLO (mejora #5)
+        # ── estado de transacción ────────────────────────────────────
         self._reset_transaction()
-        self.greeted      = False   # ¿Ya envió EHLO/HELO?
-        self.running      = True
+        # ── buffer de lectura de socket (mejora #9) ──────────────────
+        self._recv_buf = bytearray()
 
     # ──────────────────────────────────────────
-    #  Estado de la transacción
+    #  Estado de transacción
     # ──────────────────────────────────────────
 
     def _reset_transaction(self):
-        self.mail_from   = None
-        self.rcpt_list   = []
-        self.in_data     = False
-        self.data_lines  = []
+        self.mail_from      = None
+        self.mail_from_size = 0      # SIZE= anunciado por el cliente (mejora #2)
+        self.rcpt_list      = []
+        self.in_data        = False
+        self.data_lines     = []
 
     # ──────────────────────────────────────────
-    #  E/S con timeout
+    #  E/S
     # ──────────────────────────────────────────
 
     def _send(self, code: str, message: str):
@@ -73,86 +76,89 @@ class SMTPSession(threading.Thread):
             self.running = False
 
     def _recv_line(self, timeout: float) -> str | None:
-        """Lee una línea del socket con timeout. Retorna None si hay timeout/error."""
+        """
+        Lee una línea usando el buffer compartido de la sesión.
+        Mejora #9: reemplaza el bucle recv(1) por lectura en chunks.
+        """
         self.conn.settimeout(timeout)
-        buf = b""
         try:
-            while True:
-                ch = self.conn.recv(1)
-                if not ch:
-                    return None
-                buf += ch
-                if buf.endswith(b"\n"):
-                    return decode_line(buf)
+            line, self._recv_buf = recv_line_buffered(self.conn, self._recv_buf)
+            return line
         except socket.timeout:
             return None
         except OSError:
             return None
 
     # ──────────────────────────────────────────
-    #  Interacción con el operador del servidor
+    #  Consola del operador
     # ──────────────────────────────────────────
 
     def _ask_operator(self, prompt: str) -> bool:
-        """Pregunta al operador en consola (hilo-seguro). Retorna True = aceptar."""
         with _console_lock:
             while True:
                 try:
                     ans = input(f"\n[OPERADOR] {prompt} (y/n): ").strip().lower()
                 except EOFError:
-                    return True   # Sin terminal interactiva → aceptar todo
+                    return True
                 if ans in ("y", "n"):
                     return ans == "y"
-                print("  Por favor ingresá 'y' o 'n'.")
+                print("  Ingresá 'y' o 'n'.")
 
     # ──────────────────────────────────────────
-    #  Generación de notificación de no entrega
+    #  Bounce (RFC 5321 §6.1)
     # ──────────────────────────────────────────
 
     def _send_bounce(self, reason: str):
-        """
-        RFC 5321 §6.1 — Si la entrega falla después de que el servidor
-        aceptó la responsabilidad, genera un bounce al remitente.
-        """
-        if not self.mail_from or self.mail_from == "<>":
-            return
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        bounce_path = os.path.join(MAILBOX_DIR, f"bounce_{timestamp}.txt")
-        with open(bounce_path, "w", encoding="utf-8") as f:
+        if not self.mail_from or is_null_address(self.mail_from):
+            return   # nunca hacer bounce a dirección nula (evita loops)
+        ts   = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        path = os.path.join(MAILBOX_DIR, f"bounce_{ts}.txt")
+        now  = datetime.datetime.now().strftime("%a, %d %b %Y %H:%M:%S +0000")
+        with open(path, "w", encoding="utf-8") as f:
             f.write(f"From: MAILER-DAEMON@{SERVER_DOMAIN}\r\n")
             f.write(f"To: {self.mail_from}\r\n")
             f.write(f"Subject: Delivery failure notification\r\n")
-            f.write(f"Date: {datetime.datetime.now().strftime('%a, %d %b %Y %H:%M:%S +0000')}\r\n")
+            f.write(f"Date: {now}\r\n")
+            f.write(f"Message-ID: {make_message_id(SERVER_DOMAIN)}\r\n")
             f.write(f"\r\n")
-            f.write(f"Su mensaje no pudo ser entregado.\r\n")
-            f.write(f"Motivo: {reason}\r\n")
-        print(f"  [BOUNCE] Notificación generada → {bounce_path}")
+            f.write(f"Su mensaje no pudo ser entregado.\r\nMotivo: {reason}\r\n")
+        print(f"  [BOUNCE] → {path}")
 
     # ──────────────────────────────────────────
-    #  Almacenamiento del mensaje
+    #  Almacenamiento
     # ──────────────────────────────────────────
 
-    def _store_message(self, received_header: str):
-        """Guarda el mensaje en el directorio mailbox/."""
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        msg_path  = os.path.join(MAILBOX_DIR, f"msg_{timestamp}.txt")
-        lines     = dot_unstuff(self.data_lines)
-        with open(msg_path, "w", encoding="utf-8") as f:
-            f.write(received_header.rstrip("\r\n") + "\n")
-            for line in lines:
-                f.write(line.rstrip("\r\n") + "\n")
-        print(f"  [STORE] Mensaje guardado → {msg_path}")
+    def _store_message(self, received_hdr: str, msg_id: str):
+        ts   = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        path = os.path.join(MAILBOX_DIR, f"msg_{ts}.txt")
+        lines = dot_unstuff(self.data_lines)
+        with open(path, "w", encoding="utf-8") as f:
+            # Cabeceras insertadas por el servidor (van al principio)
+            f.write(received_hdr.rstrip("\r\n") + "\n")
+            f.write(f"Message-ID: {msg_id}\r\n")
+            for ln in lines:
+                f.write(ln.rstrip("\r\n") + "\n")
+        print(f"  [STORE] → {path}")
 
     # ──────────────────────────────────────────
     #  Cabecera Received (RFC 5321 §4.4)
     # ──────────────────────────────────────────
 
     def _make_received_header(self) -> str:
-        now = datetime.datetime.now().strftime("%a, %d %b %Y %H:%M:%S +0000")
+        """
+        Formato correcto según RFC 5321 §4.4:
+        Received: from <dominio> ([IP])
+                    by <servidor> with ESMTP|SMTP
+                    id <message-id>;
+                    <fecha RFC 2822>
+        """
+        now      = datetime.datetime.now().strftime("%a, %d %b %Y %H:%M:%S +0000")
+        protocol = "ESMTP" if self.used_esmtp else "SMTP"
+        client_ip = self.addr[0]
         return (
-            f"Received: from {self.addr[0]} "
-            f"by {SERVER_DOMAIN} "
-            f"with SMTP; {now}"
+            f"Received: from {client_ip} ([{client_ip}])\n"
+            f"          by {SERVER_DOMAIN} with {protocol};\n"
+            f"          {now}"
         )
 
     # ──────────────────────────────────────────
@@ -163,20 +169,22 @@ class SMTPSession(threading.Thread):
         if not arg:
             self._send(R_PARAM_ERROR, "Se requiere el dominio del cliente")
             return
-        self.greeted = True
+        self.greeted    = True
+        self.used_esmtp = False   # mejora #5: marcamos sesión como SMTP básico
         self._reset_transaction()
-        self._send(R_OK, f"{SERVER_DOMAIN} Hola {arg}, encantado de conocerte")
+        self._send(R_OK, f"{SERVER_DOMAIN} Hola {arg}")
 
     def _handle_ehlo(self, arg: str):
         if not arg:
             self._send(R_PARAM_ERROR, "Se requiere el dominio del cliente")
             return
-        self.greeted = True
+        self.greeted    = True
+        self.used_esmtp = True    # mejora #5: marcamos sesión como ESMTP
         self._reset_transaction()
-        # Respuesta multi-línea con extensiones soportadas
+        # Mejora #2: anunciamos SIZE con el límite real
         extensions = [
             f"250-{SERVER_DOMAIN} Saluda a {arg}",
-            "250-SIZE 10485760",
+            f"250-SIZE {MAX_MESSAGE_SIZE}",
             "250-8BITMIME",
             "250-VRFY",
             "250 HELP",
@@ -193,43 +201,71 @@ class SMTPSession(threading.Thread):
         if not self.greeted:
             self._send(R_BAD_SEQUENCE, "Primero enviá EHLO/HELO")
             return
-        if self.mail_from:
+        if self.mail_from is not None:
             self._send(R_BAD_SEQUENCE, "Transacción ya iniciada, usá RSET")
             return
-        addr = parse_address(arg)
-        if mail_regex_validator(addr):
-            self.mail_from = addr if addr else "<>"
-            self._send(R_OK, f"De acuerdo, remitente: {self.mail_from}")
-        else:
-            self._send(R_PARAM_ERROR, "Formato de mail inválido")
+
+        # Mejora #3 + #2: parse unificado que soporta <>, SIZE= y otros params
+        addr, params = parse_mail_from(arg)
+
+        # Dirección nula <> es válida (RFC 5321 §4.5.5) — mejora #3
+        if not is_null_address(addr) and not mail_regex_validator(addr):
+            self._send(R_PARAM_ERROR, "Formato de dirección inválido")
+            return
+
+        # Mejora #2: validar SIZE si fue informado por el cliente
+        announced_size = 0
+        if "SIZE" in params:
+            try:
+                announced_size = int(params["SIZE"])
+            except ValueError:
+                self._send(R_PARAM_ERROR, "Valor SIZE inválido")
+                return
+            if announced_size > MAX_MESSAGE_SIZE:
+                self._send(
+                    R_EXCEEDED_STORAGE,
+                    f"Mensaje demasiado grande: máximo {MAX_MESSAGE_SIZE} bytes"
+                )
+                return
+
+        self.mail_from      = addr if addr else "<>"
+        self.mail_from_size = announced_size
+        size_info = f" (SIZE anunciado: {announced_size}B)" if announced_size else ""
+        self._send(R_OK, f"Remitente aceptado: {self.mail_from}{size_info}")
 
     def _handle_rcpt(self, arg: str):
         if not self.greeted:
             self._send(R_BAD_SEQUENCE, "Primero enviá EHLO/HELO")
             return
-        if not self.mail_from:
+        if self.mail_from is None:
             self._send(R_BAD_SEQUENCE, "Primero enviá MAIL FROM")
             return
-        addr = parse_address(arg)
 
-        if not mail_regex_validator(addr):
-            self._send(R_PARAM_ERROR, "Formato de mail inválido")
+        # Mejora #1: límite de 100 destinatarios (RFC 5321 §4.5.3.1)
+        if len(self.rcpt_list) >= MAX_RECIPIENTS:
+            self._send(
+                R_INSUFF_STORAGE,
+                f"Demasiados destinatarios: máximo {MAX_RECIPIENTS}"
+            )
             return
 
+        addr = parse_address(arg)
         if not addr:
             self._send(R_PARAM_ERROR, "Dirección de destinatario inválida")
             return
+        if not mail_regex_validator(addr):
+            self._send(R_PARAM_ERROR, "Formato de dirección inválido")
+            return
 
-        local_part = addr.split("@")[0].lower() if "@" in addr else addr.lower()
+        local = addr.split("@")[0].lower() if "@" in addr else addr.lower()
 
-        # Postmaster siempre se acepta (RFC 5321 §4.5.1)
-        if local_part in RESERVED_MAILBOXES:
+        # Postmaster/buzones reservados → siempre aceptar
+        if local in RESERVED_MAILBOXES:
             self.rcpt_list.append(addr)
             self._send(R_OK, f"Destinatario aceptado: {addr}")
             return
 
-        accept = self._ask_operator(f"¿Aceptar destinatario '{addr}'?")
-        if accept:
+        if self._ask_operator(f"¿Aceptar destinatario '{addr}'?"):
             self.rcpt_list.append(addr)
             self._send(R_OK, f"Destinatario aceptado: {addr}")
         else:
@@ -239,7 +275,7 @@ class SMTPSession(threading.Thread):
         if not self.greeted:
             self._send(R_BAD_SEQUENCE, "Primero enviá EHLO/HELO")
             return
-        if not self.mail_from:
+        if self.mail_from is None:
             self._send(R_BAD_SEQUENCE, "Primero enviá MAIL FROM")
             return
         if not self.rcpt_list:
@@ -249,30 +285,68 @@ class SMTPSession(threading.Thread):
         self._send(R_START_MAIL, "Inicio de datos; terminá con <CRLF>.<CRLF>")
         self.in_data    = True
         self.data_lines = []
+        total_bytes     = 0
 
-        # Recibir líneas de datos con timeout de bloque (3 min)
         while True:
-            line = self._recv_line(timeout=180)
+            line = self._recv_line(timeout=TIMEOUT_DATA_BLOCK)
             if line is None:
                 self._send(R_SERVICE_UNAVAIL, "Timeout durante recepción de datos")
                 self.running = False
                 return
-            if line == ".":          # Línea terminadora
+            if line == ".":
                 break
+
+            # Mejora #4: validar longitud de línea (RFC 5321 §4.5.3.1)
+            if len(line) > MAX_LINE_LENGTH:
+                # Seguimos leyendo hasta el terminador para no dejar el canal roto,
+                # pero al final rechazamos el mensaje.
+                self.data_lines.append(line)
+                total_bytes += len(line)
+                # Marcar que hubo una línea inválida
+                if not hasattr(self, "_line_too_long"):
+                    self._line_too_long = True
+                continue
+
             self.data_lines.append(line)
+            total_bytes += len(line)
+
+            # Mejora #2: rechazar si se supera el tamaño máximo durante recepción
+            if total_bytes > MAX_MESSAGE_SIZE:
+                # Drenar el resto hasta el terminador
+                while True:
+                    drain = self._recv_line(timeout=TIMEOUT_DATA_BLOCK)
+                    if drain is None or drain == ".":
+                        break
+                self.in_data = False
+                self._reset_transaction()
+                self._send(
+                    R_EXCEEDED_STORAGE,
+                    f"Mensaje demasiado grande: máximo {MAX_MESSAGE_SIZE} bytes"
+                )
+                return
 
         self.in_data = False
-        received_hdr = self._make_received_header()
 
-        # El operador decide si acepta el mensaje completo
-        accept = self._ask_operator(
+        # Verificar si hubo línea demasiado larga
+        if getattr(self, "_line_too_long", False):
+            del self._line_too_long
+            self._reset_transaction()
+            self._send(
+                R_PARAM_ERROR,
+                f"Línea demasiado larga: máximo {MAX_LINE_LENGTH} caracteres"
+            )
+            return
+
+        received_hdr = self._make_received_header()
+        msg_id       = make_message_id(SERVER_DOMAIN)   # mejora #8
+
+        if self._ask_operator(
             f"¿Aceptar mensaje de '{self.mail_from}' "
-            f"para {self.rcpt_list} ({len(self.data_lines)} líneas)?"
-        )
-        if accept:
+            f"para {self.rcpt_list} ({len(self.data_lines)} líneas, {total_bytes}B)?"
+        ):
             try:
-                self._store_message(received_hdr)
-                self._send(R_OK, "Mensaje aceptado y almacenado")
+                self._store_message(received_hdr, msg_id)
+                self._send(R_OK, f"Mensaje aceptado. ID: {msg_id}")
             except OSError as e:
                 self._send_bounce(f"Error al almacenar: {e}")
                 self._send(R_INSUFF_STORAGE, "Error de almacenamiento")
@@ -284,21 +358,21 @@ class SMTPSession(threading.Thread):
 
     def _handle_rset(self):
         self._reset_transaction()
-        self._send(R_OK, "Estado reiniciado")
+        # Mejora #6: RSET limpia la transacción pero NO el estado de saludo
+        # (greeted y used_esmtp se mantienen — RFC 5321 §4.1.1.5)
+        self._send(R_OK, "Estado de transacción reiniciado")
 
     def _handle_vrfy(self, arg: str):
         if not arg:
             self._send(R_PARAM_ERROR, "Se requiere un argumento")
             return
         if not mail_regex_validator(arg):
-            self._send(R_PARAM_ERROR, "Formato de mail inválido")
+            self._send(R_PARAM_ERROR, "Formato de dirección inválido")
             return
-
         local = arg.split("@")[0].lower() if "@" in arg else arg.lower()
         if local in RESERVED_MAILBOXES:
             self._send(R_OK, f"{arg} <{arg}@{SERVER_DOMAIN}>")
         else:
-            # RFC 5321 §3.5.2 — puede responder 252 sin verificar
             self._send(R_VRFY_CANNOT, f"No se puede verificar {arg}, pero se intentará la entrega")
 
     def _handle_noop(self):
@@ -309,14 +383,9 @@ class SMTPSession(threading.Thread):
         self.running = False
 
     def _handle_help(self):
-        """
-        RFC 5321 §4.1.1.8 — Respuesta multi-línea 214.
-        Todas las líneas intermedias usan '214-'; la última usa '214 '.
-        """
         for i, text in enumerate(HELP_LINES):
-            is_last = (i == len(HELP_LINES) - 1)
-            separator = " " if is_last else "-"
-            line = f"{R_HELP_MESSAGE}{separator}{text}"
+            sep  = " " if i == len(HELP_LINES) - 1 else "-"
+            line = f"{R_HELP_MESSAGE}{sep}{text}"
             print(f"  S: {line}")
             try:
                 self.conn.sendall(encode_line(line))
@@ -325,7 +394,7 @@ class SMTPSession(threading.Thread):
                 return
 
     # ──────────────────────────────────────────
-    #  Bucle principal de la sesión
+    #  Bucle principal
     # ──────────────────────────────────────────
 
     def run(self):
@@ -336,7 +405,7 @@ class SMTPSession(threading.Thread):
             raw = self._recv_line(timeout=TIMEOUT_SERVER_WAIT)
 
             if raw is None:
-                print(f"  [SERVER] Timeout o conexión cerrada por {self.addr}")
+                print(f"  [SERVER] Timeout o conexión cerrada — {self.addr}")
                 try:
                     self._send(R_SERVICE_UNAVAIL, "Timeout de inactividad, cerrando")
                 except Exception:
@@ -347,25 +416,22 @@ class SMTPSession(threading.Thread):
                 continue
 
             print(f"  C: {raw}")
-
-            # Separar comando y argumentos
             parts   = raw.strip().split(None, 1)
             command = parts[0].upper()
             arg     = parts[1] if len(parts) > 1 else ""
 
-            # Despachar comando
-            if   command == "HELO":      self._handle_helo(arg)
-            elif command == "EHLO":      self._handle_ehlo(arg)
-            elif command == "MAIL":      self._handle_mail(arg)
-            elif command == "RCPT":      self._handle_rcpt(arg)
-            elif command == "DATA":      self._handle_data()
-            elif command == "RSET":      self._handle_rset()
-            elif command == "VRFY":      self._handle_vrfy(arg)
-            elif command == "NOOP":      self._handle_noop()
-            elif command == "QUIT":      self._handle_quit()
-            elif command == "HELP":      self._handle_help()
-            elif command in ("EXPN"):
-                self._send(R_NOT_IMPLEMENTED, f"Comando {command} no implementado")
+            if   command == "HELO": self._handle_helo(arg)
+            elif command == "EHLO": self._handle_ehlo(arg)
+            elif command == "MAIL": self._handle_mail(arg)
+            elif command == "RCPT": self._handle_rcpt(arg)
+            elif command == "DATA": self._handle_data()
+            elif command == "RSET": self._handle_rset()
+            elif command == "VRFY": self._handle_vrfy(arg)
+            elif command == "NOOP": self._handle_noop()
+            elif command == "QUIT": self._handle_quit()
+            elif command == "HELP": self._handle_help()
+            elif command == "EXPN":
+                self._send(R_NOT_IMPLEMENTED, "EXPN no implementado")
             else:
                 self._send(R_SYNTAX_ERROR, f"Comando desconocido: {command}")
 
@@ -373,7 +439,7 @@ class SMTPSession(threading.Thread):
             self.conn.close()
         except OSError:
             pass
-        print(f"  [SERVER] Sesión cerrada con {self.addr[0]}:{self.addr[1]}")
+        print(f"  [SERVER] Sesión cerrada — {self.addr[0]}:{self.addr[1]}")
 
 
 # ══════════════════════════════════════════════
@@ -386,16 +452,15 @@ def main():
     srv.bind((SMTP_HOST, SMTP_PORT))
     srv.listen(5)
     print(f"[SERVER] Escuchando en {SMTP_HOST}:{SMTP_PORT}")
-    print(f"[SERVER] Mensajes se guardarán en: {MAILBOX_DIR}/")
-    print(f"[SERVER] Presioná Ctrl+C para detener.\n")
-
+    print(f"[SERVER] Mensajes en: {MAILBOX_DIR}/")
+    print(f"[SERVER] Límites: {MAX_RECIPIENTS} destinatarios, {MAX_MESSAGE_SIZE // 1024 // 1024}MB por mensaje")
+    print(f"[SERVER] Ctrl+C para detener.\n")
     try:
         while True:
             conn, addr = srv.accept()
-            session = SMTPSession(conn, addr)
-            session.start()
+            SMTPSession(conn, addr).start()
     except KeyboardInterrupt:
-        print("\n[SERVER] Deteniendo servidor...")
+        print("\n[SERVER] Deteniendo...")
     finally:
         srv.close()
 
