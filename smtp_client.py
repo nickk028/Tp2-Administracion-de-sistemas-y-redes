@@ -117,7 +117,7 @@ class SMTPClient:
             print(f"  [ERROR] Red: {e}")
             return None, ""
 
-        full_text = " | ".join(lines)
+        full_text = "\n  S: ".join(lines)
         print(f"  S: {full_text}")
         return code, full_text
 
@@ -264,9 +264,14 @@ class SMTPClient:
         self._recv_response(TIMEOUT_MAIL_RCPT)
         self.disconnect()
     
-    def cmd_help(self):
+    def cmd_help(self) -> bool:
         self._send_cmd("HELP")
-        self._print_menu()
+        code, _ = self._recv_response(TIMEOUT_MAIL_RCPT)
+        if code is None:
+            print("  [TIMEOUT] HELP sin respuesta.")
+            return False
+        return code.startswith("2")
+
 
     # ──────────────────────────────────────────
     #  Helpers de presentación
@@ -346,7 +351,7 @@ class SMTPClient:
 
                 if self.cmd_data():
                     print("  [OK] Mensaje enviado correctamente.")
-                    self._print_menu()   # Refrescar estado (se limpió)
+                    self._print_menu()   # Refrescar estado
 
             elif choice == "4":  # RSET
                 if self.cmd_rset():

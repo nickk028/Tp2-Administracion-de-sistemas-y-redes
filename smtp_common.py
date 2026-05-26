@@ -58,6 +58,45 @@ RESERVED_MAILBOXES = {"ipineda", "ifalcone", "rpodazza"}
 #  Utilidades
 # ──────────────────────────────────────────────
 
+HELP_LINES = [
+    " Lista de ayuda:",
+    "",
+    " Codigos de respuesta SMTP:",
+    "  214 Help Message         -> Información sobre cómo utilizar el receptor.",
+    "  220 Service ready        -> El servidor esta listo para recibir conexiones.",
+    "  221 Goodbye              -> La conexion se cerro correctamente.",
+    "  250 OK                   -> La accion solicitada se completo con exito.",
+    "  251 Forward              -> El usuario no es local; el mensaje sera reenviado.",
+    "  252 VRFY cannot          -> No se puede verificar el usuario, pero se intentara entregar.",
+    "  354 Start mail input     -> Comenzar envio de datos; finalizar con <CRLF>.<CRLF>.",
+    "  421 Service unavailable  -> Servicio no disponible; se cerrara la conexion.",
+    "  450 Mailbox busy         -> El buzon no esta disponible temporalmente.",
+    "  451 Local error          -> Error local durante el procesamiento.",
+    "  452 Insufficient storage -> Espacio insuficiente o demasiados destinatarios.",
+    "  500 Syntax error         -> Error de sintaxis o comando desconocido.",
+    "  501 Parameter error      -> Error de sintaxis en parametros o argumentos.",
+    "  502 Not implemented      -> Comando no implementado por el servidor.",
+    "  503 Bad sequence         -> Secuencia incorrecta de comandos.",
+    "  504 Param not impl       -> Parametro no soportado por el servidor.",
+    "  550 Mailbox unavailable  -> El buzon no existe o no esta disponible.",
+    "  551 User not local       -> El usuario no pertenece a este servidor.",
+    "  552 Exceeded storage     -> Se excedio la capacidad de almacenamiento.",
+    "  553 Name not allowed     -> Nombre o direccion de buzon invalida.",
+    "  554 Transaction failed   -> La transaccion de correo fallo.",
+    "",
+    " Comandos SMTP disponibles:",
+    "  EHLO <dominio>           -> Inicia la comunicacion con el servidor.",
+    "  MAIL FROM:<direccion>    -> Define el remitente del mensaje.",
+    "  RCPT TO:<direccion>      -> Agrega un destinatario al mensaje.",
+    "  DATA                     -> Inicia el envio del cuerpo del mensaje.",
+    "                              Finalizar con una linea que contenga solo '.'",
+    "  RSET                     -> Cancela la transaccion actual y limpia el estado.",
+    "  VRFY <direccion>         -> Consulta si un usuario existe.",
+    "  NOOP                     -> Mantiene activa la conexion sin realizar acciones.",
+    "  HELP                     -> Muestra esta ayuda.",
+    "  QUIT                     -> Finaliza la sesion SMTP.",
+]
+
 def encode_line(text: str) -> bytes:
     """Codifica una línea de texto a bytes CRLF."""
     return (text + "\r\n").encode("utf-8")
