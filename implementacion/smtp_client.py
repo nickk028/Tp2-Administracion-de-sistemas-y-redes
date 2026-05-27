@@ -1,25 +1,16 @@
-"""
-smtp_client.py — Cliente SMTP según RFC 5321
-Uso: python smtp_client.py
-
-Flujo:
-  1. Conecta al servidor y espera el 220.
-  2. Envía EHLO y guarda las extensiones del servidor.
-     Si el servidor no soporta EHLO, hace fallback automático a HELO.
-  3. Menú interactivo: MAIL FROM, RCPT TO, DATA, RSET, VRFY, NOOP, HELP, QUIT.
-  4. Timeouts individuales por fase según RFC 5321 §4.5.3.2.
-"""
-
 import socket
 import datetime
 
-from smtp_common import (
+from implementacion.smtp_common import (
+    #Codigos numeros para errores y respuestas
     SMTP_HOST, SMTP_PORT,
     TIMEOUT_GREETING, TIMEOUT_MAIL_RCPT,
     TIMEOUT_DATA_INIT, TIMEOUT_DATA_BLOCK, TIMEOUT_DATA_END,
     MAX_MESSAGE_SIZE, MAX_LINE_LENGTH,
-    encode_line, decode_line,
-    recv_line_buffered,          # mejora #9: lectura por buffer
+
+    #Funciones de codificacion y decodificacion
+    encode_line,
+    recv_line_buffered,
     dot_stuff,
 )
 
@@ -41,9 +32,9 @@ class SMTPClient:
         self._rcpt_list: list[str]   = []
         # Extensiones anunciadas por el servidor tras EHLO
         self.extensions: dict[str, str] = {}
-        # ¿Se negoció ESMTP? (False si se cayó a HELO)  — mejora #10
+        # ¿Se negoció ESMTP? (False si se cayó a HELO)
         self._using_esmtp = False
-        # Buffer de lectura — mejora #9
+        # Buffer de lectura
         self._recv_buf = bytearray()
 
     # ──────────────────────────────────────────
@@ -51,6 +42,9 @@ class SMTPClient:
     # ──────────────────────────────────────────
 
     def connect(self) -> bool:
+        """
+        Intenta establecer conexion con el servidor en el host y el puerto especificado
+        """
         print(f"[CLIENT] Conectando a {self.host}:{self.port}...")
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
@@ -76,6 +70,9 @@ class SMTPClient:
         return True
 
     def disconnect(self):
+        """
+        Cierra la conexion
+        """
         if self.sock:
             try:
                 self.sock.close()
@@ -84,17 +81,20 @@ class SMTPClient:
             self.sock = None
 
     # ──────────────────────────────────────────
-    #  E/S con timeout
+    #  Funciones de Entrada y Salida
     # ──────────────────────────────────────────
 
     def _send_cmd(self, line: str):
+        """
+        Envia un mensaje por la terminal con la marca del client 
+        Formato: C: Mensaje
+        """
         print(f"  C: {line}")
         self.sock.sendall(encode_line(line))
 
     def _recv_response(self, timeout: float) -> tuple[str | None, str]:
         """
         Lee una respuesta SMTP completa (posiblemente multi-línea).
-        Mejora #9: usa recv_line_buffered en vez de recv(1).
         """
         self.sock.settimeout(timeout)
         lines = []
@@ -121,14 +121,13 @@ class SMTPClient:
         return code, "\n".join(lines)
 
     # ──────────────────────────────────────────
-    #  EHLO con fallback a HELO — mejora #10
+    #  EHLO con fallback a HELO
     # ──────────────────────────────────────────
 
     def cmd_ehlo(self) -> bool:
         """
-        Intenta EHLO primero (RFC 5321 §4.1.1.1).
-        Si el servidor responde 500/502 (no lo entiende), cae
-        automáticamente a HELO — mejora #10.
+        Intenta EHLO primero
+        Si el servidor responde 500/502, hace fallback a HELO.
         """
         self._send_cmd(f"EHLO {CLIENT_DOMAIN}")
         code, full = self._recv_response(TIMEOUT_MAIL_RCPT)
@@ -137,7 +136,7 @@ class SMTPClient:
             print("  [TIMEOUT] EHLO sin respuesta.")
             return False
 
-        # Mejora #10: fallback automático a HELO si el servidor no soporta EHLO
+        # fallback automático a HELO si el servidor no soporta EHLO
         if code in ("500", "502"):
             print("  [INFO] Servidor no soporta EHLO, usando HELO como fallback...")
             return self._cmd_helo_fallback()
@@ -162,7 +161,7 @@ class SMTPClient:
         if self.extensions:
             print(f"  [EHLO] Extensiones: {list(self.extensions.keys())}")
 
-        # Leer límite de tamaño desde la extensión SIZE anunciada — mejora #2
+        # Leer límite de tamaño desde la extensión SIZE anunciada
         if "SIZE" in self.extensions:
             try:
                 server_max = int(self.extensions["SIZE"])
@@ -172,7 +171,9 @@ class SMTPClient:
         return True
 
     def _cmd_helo_fallback(self) -> bool:
-        """HELO básico usado como fallback si EHLO falla."""
+        """
+        HELO básico usado como fallback si EHLO falla
+        """
         self._send_cmd(f"HELO {CLIENT_DOMAIN}")
         code, _ = self._recv_response(TIMEOUT_MAIL_RCPT)
         if code is None:
@@ -192,14 +193,16 @@ class SMTPClient:
     # ──────────────────────────────────────────
 
     def cmd_mail_from(self, addr: str) -> bool:
+        """
+        Handler del comando MAIL FROM usado para enviar y guardar la informacion del destinatario
+        """
         if self._mail_from is not None:
             print(f"  [INFO] Remitente ya definido: {self._mail_from}. Usá RSET para reiniciar.")
             return False
 
-        # Mejora #2: incluir SIZE= en MAIL FROM si el servidor soporta la extensión
         size_param = ""
         if self._using_esmtp and "SIZE" in self.extensions:
-            size_param = f" SIZE={MAX_MESSAGE_SIZE}"   # estimamos el máximo como cota
+            size_param = f" SIZE={MAX_MESSAGE_SIZE}"
 
         self._send_cmd(f"MAIL FROM:<{addr}>{size_param}")
         code, _ = self._recv_response(TIMEOUT_MAIL_RCPT)
@@ -214,6 +217,11 @@ class SMTPClient:
         return ok
 
     def cmd_rcpt_to(self, addr: str) -> bool:
+        """
+        Handler del comando RCPT TO utilizado para enviar y guardar los datos de el/los recipients (RCPT)
+        Limite de 100 RCPTs
+        Requiere un haber hecho MAIL FROM previamente
+        """
         self._send_cmd(f"RCPT TO:<{addr}>")
         code, _ = self._recv_response(TIMEOUT_MAIL_RCPT)
         if code is None:
@@ -229,11 +237,9 @@ class SMTPClient:
 
     def cmd_data(self) -> bool:
         """
-        Envía DATA → recibe 354 → pide asunto y cuerpo → envía con dot-stuffing.
-        Mejoras aplicadas:
-        #4 — valida longitud de línea antes de enviar
-        #2 — advierte si el mensaje supera el límite del servidor
-        #8 — las cabeceras automáticas incluyen el estado real de la sesión
+        Handler del comando DATA utilizado para escribir y guardar la data del mail
+        Requiere haber hecho MAIL FROM y RCPT TO previamente
+        Maximo de 998 lineas y maximo de 10 MB de tamaño
         """
         self._send_cmd("DATA")
         code, _ = self._recv_response(TIMEOUT_DATA_INIT)
@@ -264,14 +270,14 @@ class SMTPClient:
             if ln == ".":
                 break
 
-            # Mejora #4: advertir si la línea supera el límite RFC
+            # Advierte si la línea supera el límite RFC
             if len(ln) > MAX_LINE_LENGTH:
                 print(f"  [AVISO] Línea demasiado larga ({len(ln)} chars, máx {MAX_LINE_LENGTH}). "
-                      f"El servidor puede rechazarla.")
+                    f"El servidor puede rechazarla.")
             lines.append(ln)
 
-        # Mejora #2: calcular tamaño total y advertir si supera el límite
-        total = sum(len(l) + 2 for l in lines)   # +2 por CRLF
+        # Calcula el tamaño total y advertir si supera el límite
+        total = sum(len(l) + 2 for l in lines)
         server_max = int(self.extensions.get("SIZE", MAX_MESSAGE_SIZE) or MAX_MESSAGE_SIZE)
         if total > server_max:
             print(f"  [AVISO] El mensaje ({total}B) supera el límite del servidor ({server_max}B).")
@@ -313,18 +319,24 @@ class SMTPClient:
         return ok
 
     def cmd_rset(self) -> bool:
+        """
+        Handler del comando RSET utilizado para reiniciar los datos previamente cargados
+        """
         self._send_cmd("RSET")
         code, _ = self._recv_response(TIMEOUT_MAIL_RCPT)
         if code is None:
             print("  [TIMEOUT] RSET sin respuesta.")
             return False
         if code.startswith("2"):
-            # Mejora #6: RSET limpia transacción pero NO el estado EHLO/HELO
+            # RSET limpia transacción
             self._mail_from = None
             self._rcpt_list = []
         return code.startswith("2")
 
     def cmd_vrfy(self, arg: str) -> bool:
+        """
+        Handler del comando VRFY utilizada para intentar validar un mail ingresado
+        """
         self._send_cmd(f"VRFY {arg}")
         code, _ = self._recv_response(TIMEOUT_MAIL_RCPT)
         if code is None:
@@ -333,6 +345,9 @@ class SMTPClient:
         return True
 
     def cmd_noop(self) -> bool:
+        """
+        Handler del comando NOOP utilizado para validar el estado de la conexión
+        """
         self._send_cmd("NOOP")
         code, _ = self._recv_response(TIMEOUT_MAIL_RCPT)
         if code is None:
@@ -341,11 +356,17 @@ class SMTPClient:
         return code.startswith("2")
 
     def cmd_quit(self):
+        """
+        Handler del comando QUIT utilizado para terminar la conexion entre Cliente-Servidor
+        """
         self._send_cmd("QUIT")
         self._recv_response(TIMEOUT_MAIL_RCPT)
         self.disconnect()
 
     def cmd_help(self) -> bool:
+        """
+        Handler del comando HELP utilizado para enviar informacion util sobre comandos y codigos numericos por el servidor
+        """
         self._send_cmd("HELP")
         code, _ = self._recv_response(TIMEOUT_MAIL_RCPT)
         if code is None:
@@ -358,6 +379,9 @@ class SMTPClient:
     # ──────────────────────────────────────────
 
     def _print_menu(self):
+        """
+        Muestra el menu principal
+        """
         from_str  = self._mail_from or "(no definido)"
         rcpt_str  = ", ".join(self._rcpt_list) if self._rcpt_list else "(ninguno)"
         mode_str  = "ESMTP (extensiones activas)" if self._using_esmtp else "SMTP básico"
@@ -383,6 +407,9 @@ class SMTPClient:
         print("═" * 62)
 
     def interactive_session(self):
+        """
+        Valida las entradas del usuario y le permite ingresar comandos numericos en vez de escribir comandos enteros
+        """
         if not self.connect():
             return
 
@@ -402,12 +429,12 @@ class SMTPClient:
                 self.cmd_quit()
                 return
 
-            if choice == "1":
+            if choice == "1" or choice.lower() == "mail from":
                 addr = input("  Remitente (ej: usuario@dominio.com): ").strip()
                 if addr:
                     self.cmd_mail_from(addr)
 
-            elif choice == "2":
+            elif choice == "2" or choice.lower() == "rcpt to":
                 if not self._mail_from:
                     print("  [ERROR] Primero definí el remitente con MAIL FROM (opción 1).")
                     continue
@@ -415,7 +442,7 @@ class SMTPClient:
                 if addr:
                     self.cmd_rcpt_to(addr)
 
-            elif choice == "3":
+            elif choice == "3" or choice.lower() == "data":
                 if not self._mail_from:
                     print("  [ERROR] Falta MAIL FROM. Usá la opción 1 primero.")
                     continue
@@ -426,26 +453,26 @@ class SMTPClient:
                     print("  [OK] Mensaje enviado correctamente.")
                     self._print_menu()
 
-            elif choice == "4":
+            elif choice == "4" or choice.lower() == "rset":
                 if self.cmd_rset():
                     print("  [OK] Transacción reiniciada (saludo EHLO/HELO conservado).")
 
-            elif choice == "5":
+            elif choice == "5" or choice.lower() == "vrfy":
                 arg = input("  Dirección a verificar: ").strip()
                 if arg:
                     self.cmd_vrfy(arg)
 
-            elif choice == "6":
+            elif choice == "6" or choice.lower() == "noop":
                 if self.cmd_noop():
                     print("  [OK] Conexión activa.")
 
-            elif choice == "7":
+            elif choice == "7" or choice.lower() == "quit":
                 print("[CLIENT] Enviando QUIT...")
                 self.cmd_quit()
                 print("[CLIENT] Sesión cerrada.")
                 return
 
-            elif choice == "8":
+            elif choice == "8" or choice.lower() == "help":
                 self.cmd_help()
 
             else:

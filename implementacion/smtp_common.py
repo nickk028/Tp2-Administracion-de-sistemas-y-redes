@@ -1,34 +1,32 @@
-"""
-smtp_common.py — Constantes y utilidades compartidas RFC 5321
-"""
 import re
+import uuid
+import datetime
 
 # ──────────────────────────────────────────────
 #  Puerto y host por defecto
 # ──────────────────────────────────────────────
 SMTP_HOST = "127.0.0.1"
-SMTP_PORT = 2525          # Puerto no privilegiado para pruebas (estándar: 25)
+SMTP_PORT = 2525
 
 # ──────────────────────────────────────────────
-#  Timeouts requeridos por RFC 5321 §4.5.3.2
-#  (en segundos)
+#  Timeouts requeridos (en segundos)
 # ──────────────────────────────────────────────
-TIMEOUT_GREETING    = 300   # Espera del 220 inicial            → 5 min
-TIMEOUT_MAIL_RCPT   = 300   # Respuesta a MAIL FROM / RCPT TO   → 5 min
-TIMEOUT_DATA_INIT   = 120   # Espera del 354 tras DATA           → 2 min
-TIMEOUT_DATA_BLOCK  = 180   # Envío del cuerpo del mensaje       → 3 min
-TIMEOUT_DATA_END    = 600   # Espera del 250 tras el punto final → 10 min
-TIMEOUT_SERVER_WAIT = 300   # Espera de próximo comando          → 5 min
+TIMEOUT_GREETING    = 300   # Espera del 220 inicial
+TIMEOUT_MAIL_RCPT   = 300   # Respuesta a MAIL FROM / RCPT TO
+TIMEOUT_DATA_INIT   = 120   # Espera del 354 tras DATA
+TIMEOUT_DATA_BLOCK  = 180   # Envío del cuerpo del mensaje
+TIMEOUT_DATA_END    = 600   # Espera del 250 tras el punto final
+TIMEOUT_SERVER_WAIT = 300   # Espera de próximo comando
 
 # ──────────────────────────────────────────────
-#  Límites RFC 5321 §4.5.3.1
+#  Límites
 # ──────────────────────────────────────────────
 MAX_RECIPIENTS  = 100    # Máximo de destinatarios por transacción
-MAX_MESSAGE_SIZE = 10_485_760  # 10 MB — anunciado en EHLO SIZE
-MAX_LINE_LENGTH  = 998   # Máximo de caracteres por línea (sin CRLF)
+MAX_MESSAGE_SIZE = 10_485_760  # 10 MB anunciado en EHLO SIZE
+MAX_LINE_LENGTH  = 998   # Máximo de caracteres por línea
 
 # ──────────────────────────────────────────────
-#  Códigos de respuesta SMTP (RFC 5321 §4.2)
+#  Códigos de respuesta SMTP
 # ──────────────────────────────────────────────
 R_HELP_MESSAGE        = "214"   # Información de ayuda
 R_SERVICE_READY       = "220"   # Saludo inicial
@@ -53,12 +51,12 @@ R_NAME_NOT_ALLOWED    = "553"   # Nombre de buzón no permitido
 R_TRANSACTION_FAILED  = "554"   # Transacción fallida
 
 # ──────────────────────────────────────────────
-#  Buzones reservados (insensibles a mayúsculas)
+#  Buzones reservados
 # ──────────────────────────────────────────────
 RESERVED_MAILBOXES = {"ipineda", "ifalcone", "rpodazza", "postmaster", "abuse"}
 
 # ──────────────────────────────────────────────
-#  Texto de ayuda (HELP — RFC 5321 §4.1.1.8)
+#  Texto de ayuda utilizado por el servidor
 # ──────────────────────────────────────────────
 HELP_LINES = [
     " Lista de ayuda:",
@@ -100,25 +98,23 @@ HELP_LINES = [
 ]
 
 # ──────────────────────────────────────────────
-#  Utilidades de E/S
+#  Utilidades
 # ──────────────────────────────────────────────
 
 def encode_line(text: str) -> bytes:
-    """Codifica una línea de texto a bytes con CRLF (RFC 5321 §2.3.8)."""
+    """
+    Codifica una línea de texto a bytes con CRLF.
+    """
     return (text + "\r\n").encode("utf-8")
 
 
 def decode_line(data: bytes) -> str:
-    """Decodifica bytes y elimina CRLF/LF del final."""
+    """
+    Decodifica bytes y elimina CRLF/LF del final.
+    """
     return data.decode("utf-8", errors="replace").rstrip("\r\n")
 
-
-# ──────────────────────────────────────────────
-#  Lectura de socket por buffer (mejora #9)
-#  En vez de recv(1), lee chunks y acumula.
-# ──────────────────────────────────────────────
-
-RECV_BUFFER_SIZE = 4096
+RECV_BUFFER_SIZE = 4096 # Tamaño maximo del buffer
 
 def recv_line_buffered(sock, buf: bytearray) -> tuple[str | None, bytearray]:
     """
@@ -131,14 +127,12 @@ def recv_line_buffered(sock, buf: bytearray) -> tuple[str | None, bytearray]:
     en la siguiente.
     """
     while True:
-        # ¿Ya hay una línea completa en el buffer acumulado?
         idx = buf.find(b"\n")
         if idx != -1:
             line = bytes(buf[:idx + 1])
-            del buf[:idx + 1]           # consumir la línea del buffer
+            del buf[:idx + 1]
             return decode_line(line), buf
 
-        # Necesitamos más datos del socket
         try:
             chunk = sock.recv(RECV_BUFFER_SIZE)
         except OSError:
@@ -149,7 +143,7 @@ def recv_line_buffered(sock, buf: bytearray) -> tuple[str | None, bytearray]:
 
 
 # ──────────────────────────────────────────────
-#  Dot-stuffing / unstuffing (RFC 5321 §4.5.2)
+#  Dot-stuffing / unstuffing
 # ──────────────────────────────────────────────
 
 def dot_stuff(message_lines: list[str]) -> list[str]:
@@ -172,19 +166,16 @@ def dot_unstuff(message_lines: list[str]) -> list[str]:
 def mail_regex_validator(mail: str) -> bool:
     """
     Valida formato user@domain.tld.
-    La dirección nula <> es válida (RFC 5321 §4.5.5) y se trata
-    como caso especial ANTES de llamar a esta función.
+    La dirección nula <> es tomada como válida
     """
     return bool(re.fullmatch(r"([^@\s]+)@([^@\s]+)\.([^@\s]+)", mail))
 
 
 def is_null_address(addr: str) -> bool:
     """
-    RFC 5321 §4.5.5 — La dirección nula '' o '<>' es válida en MAIL FROM.
-    Se usa para bounces automáticos y evitar bucles de notificación.
+    La dirección nula '' o '<>' es válida en MAIL FROM.
     """
     return addr in ("", "<>")
-
 
 # ──────────────────────────────────────────────
 #  Extracción de parámetros de MAIL FROM
@@ -192,9 +183,9 @@ def is_null_address(addr: str) -> bool:
 
 def parse_mail_from(arg: str) -> tuple[str, dict[str, str]]:
     """
-    Parsea 'FROM:<addr> [PARAM=valor ...]' (RFC 1870 / RFC 5321 §4.1.1.2).
+    Parsea 'FROM:<addr> [PARAM=valor ...]'.
     Retorna (dirección, {parámetro: valor}).
-    Ejemplo: 'FROM:<user@x.com> SIZE=5000' → ('user@x.com', {'SIZE': '5000'})
+    Ejemplo: 'FROM:<user@x.com> SIZE=5000' : ('user@x.com', {'SIZE': '5000'})
     """
     arg = arg.strip()
     params: dict[str, str] = {}
@@ -213,7 +204,7 @@ def parse_mail_from(arg: str) -> tuple[str, dict[str, str]]:
         addr = arg
         rest = ""
 
-    # Parsear parámetros opcionales (ej. SIZE=1234)
+    # Parsear parámetros opcionales
     for token in rest.split():
         if "=" in token:
             k, v = token.split("=", 1)
@@ -226,8 +217,7 @@ def parse_mail_from(arg: str) -> tuple[str, dict[str, str]]:
 
 def parse_address(token: str) -> str:
     """
-    Extrae la dirección de un token RCPT TO:<addr>.
-    Versión simple sin parámetros extendidos.
+    Extrae unicamente la dirección de un token RCPT TO:<addr>.
     """
     token = token.strip()
     if "<" in token and ">" in token:
@@ -236,19 +226,15 @@ def parse_address(token: str) -> str:
         return token.split(":", 1)[1].strip()
     return token
 
-
 # ──────────────────────────────────────────────
-#  Generación de Message-ID (RFC 5322 §3.6.4)
+#  Generación de Message-ID
 # ──────────────────────────────────────────────
-
-import uuid
-import datetime
 
 def make_message_id(domain: str) -> str:
     """
-    Genera un Message-ID único según RFC 5322 §3.6.4.
+    Genera un Message-ID único.
     Formato: <timestamp.uuid@domain>
     """
-    ts  = datetime.datetime.utcnow().strftime("%Y%m%d%H%M%S")
+    ts  = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
     uid = uuid.uuid4().hex[:12]
     return f"<{ts}.{uid}@{domain}>"
