@@ -1,7 +1,7 @@
 import socket
 import datetime
 
-from implementacion.smtp_common import (
+from smtp_common import (
     #Codigos numeros para errores y respuestas
     SMTP_HOST, SMTP_PORT,
     TIMEOUT_GREETING, TIMEOUT_MAIL_RCPT,
@@ -43,7 +43,7 @@ class SMTPClient:
 
     def connect(self) -> bool:
         """
-        Intenta establecer conexion con el servidor en el host y el puerto especificado
+        Intenta establecer conexión con el servidor en el host y el puerto especificado
         """
         print(f"[CLIENT] Conectando a {self.host}:{self.port}...")
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

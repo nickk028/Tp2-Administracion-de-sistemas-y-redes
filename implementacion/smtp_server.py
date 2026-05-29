@@ -3,7 +3,7 @@ import threading
 import datetime
 import os
 
-from implementacion.smtp_common import (
+from smtp_common import (
     # Codigos numericos para errores y respuestas
     SMTP_HOST, SMTP_PORT,
     TIMEOUT_SERVER_WAIT, TIMEOUT_DATA_BLOCK,
@@ -436,7 +436,7 @@ class SMTPSession(threading.Thread):
 
     def run(self):
         print(f"\n[SERVER] Nueva conexión de {self.addr[0]}:{self.addr[1]}")
-        self._send(R_SERVICE_READY, f"{SERVER_DOMAIN} Servicio SMTP listo (RFC 5321)")
+        self._send(R_SERVICE_READY, f"{SERVER_DOMAIN} Servicio SMTP listo")
 
         while self.running:
             raw = self._recv_line(timeout=TIMEOUT_SERVER_WAIT)

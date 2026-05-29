@@ -1,0 +1,12 @@
+Received: from 127.0.0.1 ([127.0.0.1])
+          by localhost with ESMTP;
+          Fri, 29 May 2026 02:48:15 +0000
+Message-ID: <20260529024815.c2d1629ad0eb@localhost>
+Date: Fri, 29 May 2026 02:47:50 +0000
+From: ifalcone@alumno.huergo.edu.ar
+To: rpodazza@alumno.huergo.edu.ar, ipineda@alumno.huergo.edu.ar
+Subject: Saludos
+
+Este mail
+es una prueba
+Adios
